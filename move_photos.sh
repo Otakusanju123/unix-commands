@@ -55,11 +55,11 @@ echo "25"
 echo "# Finding files..."
 
 # Count total files to move
-total_files=$(find "$SOURCE_DIR" -maxdepth 3 -mindepth 1 -type f | wc -l)
+total_files=$(find "$SOURCE_DIR" -maxdepth 5 -mindepth 1 -type f | wc -l)
 current=0
 
 # Find and move files
-find "$SOURCE_DIR" -maxdepth 3 -mindepth 1 -type f | while read -r file; do
+find "$SOURCE_DIR" -maxdepth 5 -mindepth 1 -type f | while read -r file; do
     ((current++))
     percentage=$((current * 75 / total_files)) # Using 75% for moving files
     echo "$percentage"
