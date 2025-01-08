@@ -1,107 +1,189 @@
 #!/bin/bash
 
-# Check for zenity
-if ! command -v zenity &> /dev/null; then
-    echo "Installing zenity..."
-    sudo apt-get install -y zenity
-fi
-
-# Function to show error
-show_error() {
-    zenity --error \
-           --width=300 \
-           --title="Error" \
-           --text="$1"
+# Utility function to check and install dependencies
+check_dependencies() {
+    local deps=("zenity" "perl" "sed" "awk")
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            echo "Installing $dep..."
+            sudo apt-get install -y "$dep"
+        fi
+    done
 }
 
-# Function to show success
-show_success() {
-    zenity --info \
-           --width=300 \
-           --title="Success" \
-           --text="$1"
+# Enhanced backup with checksums
+backup_files() {
+    local dir="$1"
+    local backup_dir="$HOME/.file_rename_backups"
+    local backup_file="$backup_dir/rename_backup_$(date +%Y%m%d_%H%M%S).txt"
+    
+    mkdir -p "$backup_dir"
+    
+    (
+        echo "# Backup created on $(date)"
+        echo "# Original directory: $dir"
+        find "$dir" -depth -printf "%p|%P|%y|%m|%s|%T@\n" | while IFS='|' read -r path relpath type perms size mtime; do
+            if [ -f "$path" ]; then
+                checksum=$(md5sum "$path" | cut -d' ' -f1)
+                echo "$path|$relpath|$type|$perms|$size|$mtime|$checksum"
+            else
+                echo "$path|$relpath|$type|$perms|$size|$mtime|"
+            fi
+        done
+    ) > "$backup_file"
+    
+    echo "$backup_file"
+}
+
+# Multi-pattern rename function
+multi_pattern_rename() {
+    local dir="$1"
+    local patterns_file="$2"
+    local options="$3"
+    local total_items=$(find "$dir" \( -type f -o -type d \) | wc -l)
+    local renamed=0
+    local errors=0
+
+    (
+        echo "0"
+        echo "# Processing files..."
+        current=0
+
+        while IFS='|' read -r pattern replacement type case_sensitive; do
+            find "$dir" -type f -print0 | while IFS= read -r -d '' file; do
+                ((current++))
+                local base=$(basename "$file")
+                local parent=$(dirname "$file")
+                local new_name="$base"
+
+                case "$type" in
+                    "regex")
+                        local perl_flags="$([[ "$case_sensitive" == "true" ]] && echo '' || echo 'i')"
+                        new_name=$(echo "$base" | perl -pe "s$pattern$replacement$perl_flags")
+                        ;;
+                    "simple")
+                        if [[ "$case_sensitive" == "true" ]]; then
+                            new_name=$(echo "$base" | sed "s|$pattern|$replacement|g")
+                        else
+                            new_name=$(echo "$base" | sed "s|$pattern|$replacement|gI")
+                        fi
+                        ;;
+                    "space")
+                        new_name=$(echo "$base" | sed -E 's/([0-9])([A-Za-z])/\1 \2/g; s/([A-Za-z])([0-9])/\1 \2/g')
+                        ;;
+                    "smart_space")
+                        new_name=$(echo "$base" | perl -pe 's/(?<=\d)(?=\D)|(?<=\D)(?=\d)|(?<=[a-z])(?=[A-Z])/ /g')
+                        ;;
+                esac
+
+                if [ "$base" != "$new_name" ]; then
+                    if mv "$file" "$parent/$new_name" 2>/dev/null; then
+                        ((renamed++))
+                    else
+                        ((errors++))
+                    fi
+                fi
+                echo $((current * 100 / (total_items * $(wc -l < "$patterns_file"))))
+            done
+        done < "$patterns_file"
+
+        echo "100"
+    ) | zenity --progress \
+               --title="Multi-Pattern Renaming" \
+               --text="Processing..." \
+               --percentage=0 \
+               --auto-close \
+               --width=400
+}
+
+# Function to get multiple patterns
+get_patterns() {
+    local temp_dir=$(mktemp -d)
+    local patterns_file="$temp_dir/patterns.txt"
+    local num_patterns=$(zenity --scale \
+        --title="Number of Patterns" \
+        --text="How many patterns do you want to apply? (1-10)" \
+        --min-value=1 \
+        --max-value=10 \
+        --value=1 \
+        --step=1)
+
+    [ -z "$num_patterns" ] && return 1
+
+    for ((i=1; i<=num_patterns; i++)); do
+        local pattern_type=$(zenity --list \
+            --title="Pattern Type #$i" \
+            --text="Select pattern type:" \
+            --radiolist \
+            --column="Select" \
+            --column="Type" \
+            TRUE "Simple Replace" \
+            FALSE "Regular Expression" \
+            FALSE "Smart Spacing" \
+            FALSE "Number-Letter Spacing")
+
+        [ -z "$pattern_type" ] && return 1
+
+        case "$pattern_type" in
+            "Simple Replace")
+                local pattern=$(zenity --entry --title="Pattern #$i" --text="Enter text to find:")
+                local replacement=$(zenity --entry --title="Replacement #$i" --text="Enter replacement:")
+                echo "$pattern|$replacement|simple|true" >> "$patterns_file"
+                ;;
+            "Regular Expression")
+                local pattern=$(zenity --entry --title="Regex #$i" --text="Enter regex pattern:")
+                local replacement=$(zenity --entry --title="Replacement #$i" --text="Enter replacement pattern:")
+                echo "$pattern|$replacement|regex|true" >> "$patterns_file"
+                ;;
+            "Smart Spacing")
+                echo ".|.|smart_space|true" >> "$patterns_file"
+                ;;
+            "Number-Letter Spacing")
+                echo ".|.|space|true" >> "$patterns_file"
+                ;;
+        esac
+    done
+
+    echo "$patterns_file"
 }
 
 # Main function
 main() {
-    # Select directory
-    local dir=$(zenity --file-selection \
-                      --directory \
-                      --title="Select the directory containing files")
-    
-    # Exit if no directory selected
-    [[ -z "$dir" ]] && exit 1
+    check_dependencies
 
-    # Get number of patterns
-    local num_patterns=$(zenity --scale \
-                               --title="Number of patterns" \
-                               --text="How many text patterns do you want to replace?" \
-                               --min-value=1 \
-                               --max-value=5 \
-                               --value=1 \
-                               --step=1)
-    
-    [[ -z "$num_patterns" ]] && exit 1
+    local dir=$(zenity --file-selection --directory --title="Select Directory")
+    [ -z "$dir" ] && exit 1
 
-    # Arrays for patterns and replacements
-    local patterns=()
-    local replacements=()
+    local patterns_file=$(get_patterns)
+    [ -z "$patterns_file" ] && exit 1
 
-    # Get patterns and replacements
-    for ((i=1; i<=num_patterns; i++)); do
-        local pattern=$(zenity --entry \
-                              --title="Pattern $i" \
-                              --text="Enter text to replace #$i:")
-        
-        [[ -z "$pattern" ]] && exit 1
-        patterns+=("$pattern")
+    local options=$(show_advanced_options)
+    local backup_file=$(backup_files "$dir") || exit 1
 
-        local replacement=$(zenity --entry \
-                                 --title="Replacement $i" \
-                                 --text="Enter replacement text #$i (leave empty to remove):")
-        replacements+=("$replacement")
-    done
+    multi_pattern_rename "$dir" "$patterns_file" "$options"
 
-    # Confirm operation
-    local files_count=$(find "$dir" -maxdepth 3 -type f | wc -l)
-    zenity --question \
-           --title="Confirm" \
-           --text="This will scan $files_count files in directory:\n$dir\n\nContinue?" \
-           --width=300
+    if ! zenity --question \
+        --title="Complete" \
+        --text="Renaming complete. Keep changes?"; then
+        restore_backup "$backup_file"
+    else
+        zenity --info \
+            --title="Complete" \
+            --text="Changes have been kept.\nBackup saved at:\n$backup_file"
+    fi
 
-    [[ $? -ne 0 ]] && exit 1
-
-    # Progress dialog
-    (
-        echo "0"
-        local count=0
-        find "$dir" -maxdepth 3 -type f | while read -r file; do
-            dir=$(dirname "$file")
-            filename=$(basename "$file")
-            new_filename="$filename"
-            
-            for i in "${!patterns[@]}"; do
-                new_filename="${new_filename/${patterns[$i]}/${replacements[$i]}}"
-            done
-            
-            if [ "$filename" != "$new_filename" ]; then
-                mv "$file" "$dir/$new_filename"
-                echo "# Renaming: $filename"
-            fi
-            
-            count=$((count + 1))
-            echo $((count * 100 / files_count))
-        done
-        echo "100"
-    ) | zenity --progress \
-               --title="Renaming Files" \
-               --text="Starting..." \
-               --percentage=0 \
-               --auto-close \
-               --width=300
-
-    show_success "Files have been renamed successfully!"
+    rm -f "$patterns_file"
 }
 
-# Run main function
+# Show advanced options dialog
+show_advanced_options() {
+    zenity --forms \
+        --title="Advanced Options" \
+        --text="Configure Options" \
+        --add-checkbox="Process hidden files" \
+        --add-checkbox="Recursive processing" \
+        --add-checkbox="Preview changes" \
+        --add-checkbox="Create log file"
+}
+
 main
