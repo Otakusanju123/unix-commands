@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Enhanced Unified Media Utility Tool
+# Unified Media Utility Tool
 # Combines functionality for file extraction, photo management,
 # file renaming, and video processing
 
@@ -16,16 +16,30 @@ DEPENDENCIES=(
     "perl" "sed" "awk"
 )
 
-# Supported Formats
-SUPPORTED_ARCHIVES=("*.rar" "*.zip" "*.7z" "*.tar.gz" "*.tar.xz" "*.tar.bz2")
-SUPPORTED_IMAGES=("*.jpg" "*.jpeg" "*.png" "*.gif" "*.bmp" "*.tiff" "*.webp")
-SUPPORTED_VIDEOS=("*.mp4" "*.mkv" "*.avi" "*.mov")
+# Supported archive formats
+SUPPORTED_ARCHIVES=(
+    "*.rar" "*.r[0-9][0-9]" "*.zip" "*.7z"
+    "*.tar.gz" "*.tgz" "*.tar.xz" "*.txz"
+    "*.tar.bz2" "*.tbz2" "*.gz" "*.bz2"
+    "*.xz" "*.Z" "*.iso" "*.deb" "*.rpm"
+)
 
-# Initialization Function
+# Supported image formats
+SUPPORTED_IMAGES=(
+    "*.jpg" "*.jpeg" "*.png" "*.gif"
+    "*.bmp" "*.tiff" "*.webp"
+)
+
+# Supported video formats
+SUPPORTED_VIDEOS=(
+    "*.mp4" "*.mkv" "*.avi" "*.mov" "*.ts"
+)
+
+# Initialization Functions
 init_config() {
     mkdir -p "$CONFIG_DIR"
     touch "$LOG_FILE"
-
+    
     if [ ! -f "$SETTINGS_FILE" ]; then
         cat > "$SETTINGS_FILE" << EOF
 DELETE_ARCHIVES=false
@@ -37,201 +51,313 @@ EOF
     source "$SETTINGS_FILE"
 }
 
-# Check Dependencies
 check_dependencies() {
     local missing=()
     for dep in "${DEPENDENCIES[@]}"; do
-        if ! command -v "$dep" &>/dev/null; then
+        if ! command -v "$dep" &> /dev/null; then
             missing+=("$dep")
         fi
     done
 
     if [ ${#missing[@]} -ne 0 ]; then
-        zenity --question --title="Dependencies Missing" \
-            --text="Missing dependencies:\n${missing[*]}\nInstall now?" --width=400
+        zenity --question \
+            --title="Dependencies Missing" \
+            --text="Missing dependencies:\n\n${missing[*]}\n\nInstall now?" \
+            --width=400
         if [ $? -eq 0 ]; then
             sudo apt-get install -y "${missing[@]}"
         else
-            zenity --error --text="Cannot continue without required dependencies."
+            zenity --error \
+                --title="Error" \
+                --text="Cannot continue without required dependencies."
             exit 1
         fi
-    else
-        zenity --info --text="All dependencies are already installed."
     fi
 }
 
-# Log Operations
 log_operation() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
-# Unified File Handling Function
-handle_files() {
-    local operation="$1"
-    local source_dir="$2"
-    local dest_dir="$3"
-    local filter="$4"
-
-    if [ ! -d "$source_dir" ]; then
-        zenity --error --text="Source directory does not exist."
-        return 1
-    fi
-
-    mkdir -p "$dest_dir"
-
-    local files=("$(find "$source_dir" -type f -name "$filter")")
-    local total_files=${#files[@]}
-
-    if [ $total_files -eq 0 ]; then
-        zenity --info --text="No files found to process."
-        return 1
-    fi
+# Archive Extraction Functions
+extract_archive() {
+    local archive="$1"
+    local extract_dir="$(dirname "$archive")"
+    local base_name="$(basename "$archive")"
 
     (
-    echo "0"; echo "# Initializing..."
-    for i in "${!files[@]}"; do
-        local file="${files[$i]}"
-        local progress=$(( (i + 1) * 100 / total_files ))
-
-        case "$operation" in
-            move)
-                mv "$file" "$dest_dir/" ;;
-            copy)
-                cp "$file" "$dest_dir/" ;;
-        esac
-
-        echo "$progress"
-        echo "# Processing file $((i + 1)) of $total_files..."
-    done
-    echo "100"; echo "# Completed."
-    ) | zenity --progress --title="File Handling" --percentage=0 --auto-close
-
-    log_operation "$operation completed for $total_files files from $source_dir to $dest_dir"
-}
-
-# Archiving Functionality
-archive_files() {
-    local source_dir=$(zenity --file-selection --directory --title="Select Directory to Archive")
-    local archive_name=$(zenity --entry --title="Archive Name" --text="Enter the name for the archive (without extension):")
-    local archive_format=$(zenity --list --radiolist --title="Select Archive Format" \
-        --column="Select" --column="Format" TRUE "zip" FALSE "tar.gz" FALSE "tar.bz2" FALSE "7z" --width=400 --height=300)
-
-    if [ -z "$source_dir" ] || [ -z "$archive_name" ] || [ -z "$archive_format" ]; then
-        zenity --error --text="All inputs are required to create an archive."
-        return 1
-    fi
-
-    local dest_file="$source_dir/../$archive_name.$archive_format"
-
-    case "$archive_format" in
-        zip)
-            zip -r "$dest_file" "$source_dir" ;;
-        tar.gz)
-            tar -czvf "$dest_file" -C "$source_dir" . ;;
-        tar.bz2)
-            tar -cjvf "$dest_file" -C "$source_dir" . ;;
-        7z)
-            7z a "$dest_file" "$source_dir" ;;
+    echo "0"; echo "# Analyzing archive..."
+    
+    case "$archive" in
+        *.rar|*.r[0-9][0-9])
+            unrar x "$archive" "$extract_dir";;
+        *.zip)
+            unzip "$archive" -d "$extract_dir";;
+        *.7z)
+            7z x "$archive" -o"$extract_dir";;
+        *.tar.gz|*.tgz)
+            tar -xzf "$archive" -C "$extract_dir";;
+        *.tar.bz2|*.tbz2)
+            tar -xjf "$archive" -C "$extract_dir";;
+        *.tar.xz|*.txz)
+            tar -xJf "$archive" -C "$extract_dir";;
+        *)
+            zenity --error --text="Unsupported format: $base_name"
+            return 1;;
     esac
 
-    zenity --info --title="Archive Created" --text="Archive saved at: $dest_file"
-    log_operation "Archived $source_dir to $dest_file"
+    echo "100"; echo "# Complete!"
+    ) | zenity --progress \
+        --title="Extracting Archive" \
+        --text="Processing $base_name..." \
+        --percentage=0 \
+        --auto-close
+
+    if [ "$DELETE_ARCHIVES" = "true" ]; then
+        rm -f "$archive"
+    fi
+    
+    log_operation "Extracted: $archive"
 }
 
-# Renaming Functionality
-rename_files() {
-    local source_dir=$(zenity --file-selection --directory --title="Select Directory for Renaming")
-    local prefix=$(zenity --entry --title="File Rename" --text="Enter the prefix for renamed files:")
+# Photo Management Functions
+manage_photos() {
+    local source_dir="$1"
+    local dest_dir="$2"
 
-    if [ -z "$source_dir" ] || [ -z "$prefix" ]; then
-        zenity --error --text="Both source directory and prefix are required."
-        return 1
-    fi
+    (
+    echo "0"; echo "# Preparing..."
+    
+    local total_files=$(find "$source_dir" -type f | wc -l)
+    local current=0
 
-    local counter=1
-    for file in "$source_dir"/*; do
-        if [ -f "$file" ]; then
-            local ext="${file##*.}"
-            mv "$file" "$source_dir/$prefix_$counter.$ext"
-            log_operation "Renamed $file to $prefix_$counter.$ext"
-            ((counter++))
+    find "$source_dir" -type f | while read -r file; do
+        ((current++))
+        local percent=$((current * 100 / total_files))
+        echo "$percent"
+        echo "# Moving file $current of $total_files"
+        
+        if [[ "${file,,}" =~ \.(jpg|jpeg|png|gif|bmp|tiff|webp)$ ]]; then
+            mv "$file" "$dest_dir/"
         fi
     done
 
-    zenity --info --title="Renaming Completed" --text="Renamed files with prefix '$prefix' in $source_dir."
+    find "$source_dir" -type d -empty -delete
+
+    echo "100"; echo "# Complete!"
+    ) | zenity --progress \
+        --title="Managing Photos" \
+        --text="Processing..." \
+        --percentage=0 \
+        --auto-close
+
+    log_operation "Moved photos from $source_dir to $dest_dir"
 }
 
-# Video Processing Functionality
-process_videos() {
-    local source_dir=$(zenity --file-selection --directory --title="Select Directory for Video Processing")
-    local dest_dir=$(zenity --file-selection --directory --title="Select Destination Directory")
+# File Renaming Functions
+rename_files() {
+    local dir="$1"
+    local pattern="$2"
+    local replacement="$3"
+    local mode="$4"
 
-    if [ -z "$source_dir" ] || [ -z "$dest_dir" ]; then
-        zenity --error --text="Both source and destination directories are required."
-        return 1
-    fi
-
-    mkdir -p "$dest_dir"
-
-    local files=("$(find "$source_dir" -type f -name "*.mp4")")
-    local total_files=${#files[@]}
-
-    if [ $total_files -eq 0 ]; then
-        zenity --info --text="No video files found to process."
-        return 1
+    if [ "$BACKUP_ENABLED" = "true" ]; then
+        backup_directory "$dir"
     fi
 
     (
-    echo "0"; echo "# Initializing video processing..."
-    for i in "${!files[@]}"; do
-        local file="${files[$i]}"
-        local progress=$(( (i + 1) * 100 / total_files ))
-        ffmpeg -i "$file" -vf "scale=1280:720" "$dest_dir/$(basename "$file")" &>/dev/null
-        echo "$progress"
-        echo "# Processing video $((i + 1)) of $total_files..."
-    done
-    echo "100"; echo "# Video processing completed."
-    ) | zenity --progress --title="Video Processing" --percentage=0 --auto-close
+    echo "0"; echo "# Scanning files..."
+    
+    local total_files=$(find "$dir" -type f | wc -l)
+    local current=0
 
-    log_operation "Processed $total_files videos from $source_dir to $dest_dir"
+    find "$dir" -type f | while read -r file; do
+        ((current++))
+        local percent=$((current * 100 / total_files))
+        local base_name=$(basename "$file")
+        local dir_name=$(dirname "$file")
+        local new_name
+
+        case "$mode" in
+            "simple")
+                new_name=$(echo "$base_name" | sed "s|$pattern|$replacement|g");;
+            "regex")
+                new_name=$(echo "$base_name" | perl -pe "s/$pattern/$replacement/g");;
+            "smart")
+                new_name=$(echo "$base_name" | perl -pe 's/(?<=\d)(?=\D)|(?<=\D)(?=\d)|(?<=[a-z])(?=[A-Z])/ /g');;
+        esac
+
+        if [ "$base_name" != "$new_name" ]; then
+            mv "$file" "$dir_name/$new_name"
+        fi
+
+        echo "$percent"
+        echo "# Processing: $current of $total_files"
+    done
+
+    echo "100"; echo "# Complete!"
+    ) | zenity --progress \
+        --title="Renaming Files" \
+        --text="Processing..." \
+        --percentage=0 \
+        --auto-close
+
+    log_operation "Renamed files in $dir using pattern: $pattern"
+}
+
+# Video Processing Functions
+process_video() {
+    local input="$1"
+    local output="$2"
+    local operation="$3"
+    local options="$4"
+
+    case "$operation" in
+        "compress")
+            local quality="${options:-medium}"
+            local presets=([high]="veryfast:18" [medium]="veryfast:23" [low]="veryfast:28")
+            local preset_values=${presets[$quality]}
+            local speed="${preset_values%:*}"
+            local crf="${preset_values#*:}"
+            
+            ffmpeg -i "$input" \
+                -c:v libx264 -preset "$speed" -crf "$crf" \
+                -c:a aac -b:a 128k \
+                -y "$output" &;;
+            
+        "subtitles")
+            local subtitle="$options"
+            ffmpeg -i "$input" -i "$subtitle" \
+                -c:v copy -c:a copy -c:s mov_text \
+                -y "$output" &;;
+    esac
+
+    local pid=$!
+    show_progress $pid "$input" | zenity --progress \
+        --title="Processing Video" \
+        --text="Starting..." \
+        --percentage=0 \
+        --auto-close
+
+    log_operation "Processed video: $input ($operation)"
+}
+
+show_progress() {
+    local pid=$1
+    local input=$2
+    local duration=$(mediainfo --Inform="Video;%Duration/String3%" "$input")
+    
+    while kill -0 $pid 2>/dev/null; do
+        echo "# Processing... Please wait"
+        sleep 1
+    done
 }
 
 # Main Menu
 main_menu() {
     while true; do
-        local choice=$(zenity --list --title="Media Utility Tool" \
+        local choice=$(zenity --list \
+            --title="Media Utility Tool" \
             --text="Select an operation:" \
             --column="Operation" --column="Description" \
             "Extract Archives" "Extract compressed files" \
             "Manage Photos" "Organize and move photos" \
             "Rename Files" "Batch rename files" \
             "Process Videos" "Compress or add subtitles" \
-            "Create Archives" "Archive files and folders" \
+            "Settings" "Configure application settings" \
             "Exit" "Exit application" \
             --width=600 --height=400)
 
         case "$choice" in
             "Extract Archives")
-                local archive=$(zenity --file-selection --title="Select Archive")
-                [ -n "$archive" ] && extract_archive "$archive" ;;
+                local archive=$(zenity --file-selection \
+                    --title="Select Archive" \
+                    --file-filter="Archives | ${SUPPORTED_ARCHIVES[*]}")
+                [ -n "$archive" ] && extract_archive "$archive";;
+                
             "Manage Photos")
-                local source=$(zenity --file-selection --directory --title="Select Source Directory")
-                local dest=$(zenity --file-selection --directory --title="Select Destination Directory")
-                [ -n "$source" ] && [ -n "$dest" ] && handle_files "move" "$source" "$dest" "*.jpg" ;;
+                local source=$(zenity --file-selection --directory \
+                    --title="Select Source Directory")
+                local dest=$(zenity --file-selection --directory \
+                    --title="Select Destination Directory")
+                [ -n "$source" ] && [ -n "$dest" ] && manage_photos "$source" "$dest";;
+                
             "Rename Files")
-                rename_files ;;
+                local dir=$(zenity --file-selection --directory \
+                    --title="Select Directory")
+                local mode=$(zenity --list \
+                    --title="Select Rename Mode" \
+                    --column="Mode" \
+                    "simple" "regex" "smart")
+                [ -n "$dir" ] && [ -n "$mode" ] && rename_files "$dir" \
+                    "$(zenity --entry --title="Pattern" --text="Enter pattern:")" \
+                    "$(zenity --entry --title="Replacement" --text="Enter replacement:")" \
+                    "$mode";;
+                
             "Process Videos")
-                process_videos ;;
-            "Create Archives")
-                archive_files ;;
+                local video=$(zenity --file-selection \
+                    --title="Select Video" \
+                    --file-filter="Videos | ${SUPPORTED_VIDEOS[*]}")
+                local operation=$(zenity --list \
+                    --title="Select Operation" \
+                    --column="Operation" \
+                    "compress" "subtitles")
+                
+                if [ -n "$video" ] && [ -n "$operation" ]; then
+                    local output="${video%.*}_processed.${video##*.}"
+                    local options
+                    
+                    case "$operation" in
+                        "compress")
+                            options=$(zenity --list \
+                                --title="Select Quality" \
+                                --column="Quality" \
+                                "high" "medium" "low");;
+                        "subtitles")
+                            options=$(zenity --file-selection \
+                                --title="Select Subtitle File" \
+                                --file-filter="Subtitles | *.srt *.ass *.ssa");;
+                    esac
+                    
+                    [ -n "$options" ] && process_video "$video" "$output" "$operation" "$options"
+                fi;;
+                
+            "Settings")
+                configure_settings;;
+                
             "Exit")
-                exit 0 ;;
+                exit 0;;
+                
+            *)
+                exit 0;;
         esac
     done
+}
+
+configure_settings() {
+    local settings=$(zenity --forms \
+        --title="Settings" \
+        --text="Configure Settings" \
+        --add-checkbox="Delete archives after extraction" \
+        --add-checkbox="Show progress dialogs" \
+        --add-checkbox="Create subfolders" \
+        --add-checkbox="Enable backups")
+
+    if [ -n "$settings" ]; then
+        IFS='|' read -r delete_archives show_progress create_subfolder backup_enabled <<< "$settings"
+        
+        cat > "$SETTINGS_FILE" << EOF
+DELETE_ARCHIVES=${delete_archives:-false}
+SHOW_PROGRESS=${show_progress:-true}
+CREATE_SUBFOLDER=${create_subfolder:-false}
+BACKUP_ENABLED=${backup_enabled:-true}
+EOF
+        
+        source "$SETTINGS_FILE"
+    fi
 }
 
 # Main Execution
 init_config
 check_dependencies
 main_menu
-
