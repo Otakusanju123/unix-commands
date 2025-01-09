@@ -1,186 +1,188 @@
 #!/bin/bash
 
-# Required packages
-DEPENDENCIES=("unrar" "unzip" "p7zip-full" "tar" "zenity" "file" "pv" "notify-send")
+# Dependencies required
+DEPENDENCIES=("unrar" "unzip" "p7zip-full" "tar" "zenity" "notify-send")
 
-# Themes and styling
-export GTK_THEME="Mint-Y-Dark"
-ZENITY_COMMON="--width=600 --height=200"
-TITLE_PREFIX="📦 Super Extractor"
-ICON_PATH="/usr/share/icons/Mint-Y/apps/48/utilities-file-archiver.png"
+# Configuration
+CONFIG_DIR="$HOME/.config/powerful-extractor"
+SETTINGS_FILE="$CONFIG_DIR/settings.conf"
+LOG_FILE="$CONFIG_DIR/extraction.log"
 
-# Supported formats
 SUPPORTED_FORMATS=(
     "*.rar" "*.r[0-9][0-9]"
     "*.zip" "*.7z" "*.tar.gz" "*.tgz"
     "*.tar.xz" "*.txz" "*.tar.bz2" "*.tbz2"
     "*.gz" "*.bz2" "*.xz" "*.Z"
+    "*.iso" "*.deb" "*.rpm"
+    "*.cab" "*.arj" "*.lzh" "*.ace"
+    "*.img" "*.dmg" "*.wim"
+    "*.cpio" "*.squashfs" "*.xar"
 )
 
-# Theme colors
-COLOR_PRIMARY="#4a90d9"
-COLOR_SUCCESS="#73d216"
-COLOR_ERROR="#cc0000"
-COLOR_WARNING="#f57900"
+# Initialize configuration
+init_config() {
+    mkdir -p "$CONFIG_DIR"
+    touch "$LOG_FILE"
+    
+    if [ ! -f "$SETTINGS_FILE" ]; then
+        cat > "$SETTINGS_FILE" << EOF
+DELETE_ARCHIVES=true
+SHOW_PROGRESS=true
+CREATE_SUBFOLDER=false
+EOF
+    fi
+    source "$SETTINGS_FILE"
+}
 
-show_styled_message() {
-    local type="$1"
-    local message="$2"
-    local icon=""
-    local color=""
-    
-    case "$type" in
-        "error") icon="❌"; color="$COLOR_ERROR" ;;
-        "success") icon="✅"; color="$COLOR_SUCCESS" ;;
-        "warning") icon="⚠️"; color="$COLOR_WARNING" ;;
-        "info") icon="ℹ️"; color="$COLOR_PRIMARY" ;;
-    esac
-    
-    zenity --info \
-        $ZENITY_COMMON \
-        --title="$TITLE_PREFIX" \
-        --text="<span size='x-large' weight='bold' color='$color'>$icon $message</span>" \
-        --ok-label=" OK "
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
 check_dependencies() {
     local missing=()
     for dep in "${DEPENDENCIES[@]}"; do
-        if ! command -v "$dep" &> /dev/null; then
-            missing+=("$dep")
-        fi
+        case "$dep" in
+            "p7zip-full")
+                if ! dpkg-query -W -f='${Status}' p7zip-full 2>/dev/null | grep -q "install ok installed"; then
+                    missing+=("$dep")
+                fi
+                ;;
+            *)
+                if ! command -v "$dep" &>/dev/null; then
+                    missing+=("$dep")
+                fi
+                ;;
+        esac
     done
-    
+
     if [ ${#missing[@]} -ne 0 ]; then
-        local install_cmd="sudo apt-get install -y ${missing[*]}"
-        if zenity --question \
-            $ZENITY_COMMON \
-            --title="$TITLE_PREFIX - Dependencies" \
-            --text="Missing required packages:\n\n${missing[*]}\n\nInstall them now?" \
-            --ok-label=" Install " \
-            --cancel-label=" Cancel "; then
-            xterm -e "$install_cmd"
+        zenity --question --title="Dependencies Missing" --text="The following dependencies are missing:\n\n${missing[*]}\n\nInstall now?" --width=400
+        if [ $? -eq 0 ]; then
+            sudo apt-get install -y ${missing[*]}
         else
+            zenity --error --title="Missing Dependencies" --text="Cannot continue without installing dependencies. Exiting." --width=300
             exit 1
         fi
     fi
 }
 
-detect_archive_type() {
-    local file="$1"
-    local mime_type=$(file --mime-type -b "$file")
-    local ext="${file##*.}"
-    
-    case "$mime_type" in
-        "application/x-rar"*) echo "rar" ;;
-        "application/zip") echo "zip" ;;
-        "application/x-7z-compressed") echo "7z" ;;
-        "application/x-tar"*|"application/gzip") echo "tar" ;;
-        *) echo "unknown" ;;
-    esac
+show_progress() {
+    local pid=$1
+    local text=$2
+    (
+        while kill -0 $pid 2>/dev/null; do
+            echo "# $text"
+            sleep 1
+        done
+    ) | zenity --progress --title="Progress" --text="$text" --percentage=0 --width=400 --auto-close --no-cancel
 }
 
 extract_archive() {
-    local file="$1"
-    local output_dir="$2"
-    local type="$3"
-    local total_size=$(stat -f %z "$file")
-    
-    case "$type" in
-        "rar")
-            unrar x -o+ "$file" "$output_dir" | \
-                stdbuf -oL tr '\r' '\n' | \
-                sed -u 's/\([0-9]\+\)%.*/\1/'
-            ;;
-        "zip")
-            unzip -o "$file" -d "$output_dir" | \
-                stdbuf -oL tr '\r' '\n' | \
-                grep -o '[0-9]\+%' | tr -d '%'
-            ;;
-        "7z")
-            7z x -o"$output_dir" "$file" | \
-                grep -o '[0-9]\+%' | tr -d '%'
-            ;;
-        "tar")
-            tar xf "$file" -C "$output_dir" --checkpoint=100 \
-                --checkpoint-action=exec='echo $TAR_CHECKPOINT'
-            ;;
+    local archive="$1"
+    local base_name=$(basename "$archive")
+    local extract_dir=$(dirname "$archive")
+
+    case "$archive" in
+        *.rar|*.r[0-9][0-9])
+            # Handle split RAR files
+            local rar_main="$(echo "$archive" | sed 's/\.r[0-9][0-9]$/.rar/')"
+            if [[ "$archive" =~ \.r[0-9][0-9]$ && -f "$rar_main" ]]; then
+                archive="$rar_main"
+            fi
+            unrar x "$archive" "$extract_dir" &
+            pid=$!
+            show_progress $pid "Extracting $base_name..."
+            wait $pid
+            # Delete all parts of split RAR files
+            if [ "$DELETE_ARCHIVES" = "true" ]; then
+                find "$extract_dir" -type f \( -name "$(basename "$archive")" -o -name "*.r[0-9][0-9]" \) -delete
+                zenity --info --title="Archive Deleted" --text="Deleted archive: $base_name and its parts" --width=300
+            fi;;
+        *.zip)
+            unzip "$archive" -d "$extract_dir" &
+            pid=$!
+            show_progress $pid "Extracting $base_name..."
+            wait $pid
+            if [ "$DELETE_ARCHIVES" = "true" ]; then
+                rm -f "$archive"
+                zenity --info --title="Archive Deleted" --text="Deleted archive: $base_name" --width=300
+            fi;;
+        *.7z)
+            7z x "$archive" -o"$extract_dir" &
+            pid=$!
+            show_progress $pid "Extracting $base_name..."
+            wait $pid
+            if [ "$DELETE_ARCHIVES" = "true" ]; then
+                rm -f "$archive"
+                zenity --info --title="Archive Deleted" --text="Deleted archive: $base_name" --width=300
+            fi;;
+        *.tar.gz|*.tgz)
+            tar -xvzf "$archive" -C "$extract_dir" &
+            pid=$!
+            show_progress $pid "Extracting $base_name..."
+            wait $pid
+            if [ "$DELETE_ARCHIVES" = "true" ]; then
+                rm -f "$archive"
+                zenity --info --title="Archive Deleted" --text="Deleted archive: $base_name" --width=300
+            fi;;
+        *.tar.bz2|*.tbz2)
+            tar -xvjf "$archive" -C "$extract_dir" &
+            pid=$!
+            show_progress $pid "Extracting $base_name..."
+            wait $pid
+            if [ "$DELETE_ARCHIVES" = "true" ]; then
+                rm -f "$archive"
+                zenity --info --title="Archive Deleted" --text="Deleted archive: $base_name" --width=300
+            fi;;
+        *.tar.xz|*.txz)
+            tar -xvJf "$archive" -C "$extract_dir" &
+            pid=$!
+            show_progress $pid "Extracting $base_name..."
+            wait $pid
+            if [ "$DELETE_ARCHIVES" = "true" ]; then
+                rm -f "$archive"
+                zenity --info --title="Archive Deleted" --text="Deleted archive: $base_name" --width=300
+            fi;;
         *)
-            show_styled_message "error" "Unsupported archive type"
-            return 1
-            ;;
+            zenity --error --title="Unsupported Format" --text="The file format is not supported: $base_name" --width=300
+            log_message "Unsupported file: $base_name"
+            return;;
     esac
+
+    log_message "Extracted $base_name to $extract_dir"
+    zenity --info --title="Extraction Complete" --text="Successfully extracted: $base_name" --width=300
 }
 
-show_advanced_options() {
-    local options=$(zenity --forms \
-        $ZENITY_COMMON \
-        --title="$TITLE_PREFIX - Advanced Options" \
-        --text="Configure extraction options:" \
-        --add-checkbox="Extract to separate folder" \
-        --add-checkbox="Auto-detect password" \
-        --add-checkbox="Remove archive after extraction" \
-        --add-checkbox="Preserve file permissions" \
-        --add-checkbox="Overwrite existing files" \
-        --add-checkbox="Show detailed progress")
-    echo "$options"
+main_menu() {
+    while true; do
+        local choice=$(zenity --list --title="Powerful Extractor" \
+            --text="<span font='16' color='#4a90d9'>Select an option:</span>" \
+            --column="Option" --column="Description" \
+            "Extract" "Extract files from an archive" \
+            "Exit" "Exit the application" --width=500 --height=300 --ok-label="Select")
+
+        case "$choice" in
+            "Extract")
+                local archive=$(zenity --file-selection --title="Select Archive to Extract" \
+                    --file-filter="Archives | ${SUPPORTED_FORMATS[*]}" \
+                    --file-filter="All Files | *")
+
+                if [ -n "$archive" ]; then
+                    extract_archive "$archive"
+                fi
+                ;;
+            "Exit")
+                exit 0
+                ;;
+            *)
+                zenity --error --title="Invalid Option" --text="Please select a valid option." --width=300
+                ;;
+        esac
+    done
 }
 
-main() {
-    check_dependencies
-    
-    # Welcome animation (requires notify-send)
-    notify-send -i "$ICON_PATH" "$TITLE_PREFIX" "Welcome! Select your archive file to begin." 
-    
-    # File selection with preview
-    local file=$(zenity --file-selection \
-        --title="$TITLE_PREFIX - Select Archive" \
-        --file-filter="Archives |${SUPPORTED_FORMATS[*]}" \
-        $ZENITY_COMMON)
-    
-    [ -z "$file" ] && exit 1
-    
-    # Get archive info
-    local archive_type=$(detect_archive_type "$file")
-    local dir=$(dirname "$file")
-    local options=$(show_advanced_options)
-    
-    # Create output directory
-    local output_dir="$dir/extracted_$(basename "$file" | sed 's/\.[^.]*$//')"
-    mkdir -p "$output_dir"
-    
-    # Extract with progress
-    (
-        echo "0"
-        echo "# 🔍 Analyzing archive..."
-        sleep 1
-        
-        extract_archive "$file" "$output_dir" "$archive_type" | while read -r progress; do
-            echo "$progress"
-            echo "# 📦 Extracting: $progress%"
-        done
-        
-        echo "100"
-        echo "# ✨ Extraction complete!"
-    ) | zenity --progress \
-        $ZENITY_COMMON \
-        --title="$TITLE_PREFIX - Extracting" \
-        --text="Starting extraction..." \
-        --percentage=0 \
-        --auto-close
-    
-    # Success notification
-    if [ $? -eq 0 ]; then
-        notify-send -i "$ICON_PATH" "$TITLE_PREFIX" "Extraction completed successfully! 🎉"
-        if zenity --question \
-            $ZENITY_COMMON \
-            --title="$TITLE_PREFIX - Complete" \
-            --text="<span size='large' weight='bold'>✅ Files extracted to:</span>\n$output_dir\n\nOpen the folder?" \
-            --ok-label=" Open Folder " \
-            --cancel-label=" Close "; then
-            xdg-open "$output_dir"
-        fi
-    fi
-}
+# Main Execution
+init_config
+check_dependencies
+main_menu
 
-main
